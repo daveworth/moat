@@ -353,26 +353,11 @@ func (r *AppleRuntime) StopContainer(ctx context.Context, containerID string) er
 
 // WaitContainer blocks until the container exits and returns the exit code.
 func (r *AppleRuntime) WaitContainer(ctx context.Context, containerID string) (int64, error) {
-	// Apple's container CLI may have a "wait" command, or we poll with inspect
-	// Try "container wait" first
-	cmd := exec.CommandContext(ctx, r.containerBin, "wait", containerID)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		// If wait is not available, fall back to polling
-		return r.waitByPolling(ctx, containerID)
-	}
-
-	// Parse exit code from output
-	exitStr := strings.TrimSpace(stdout.String())
-	exitCode, err := strconv.ParseInt(exitStr, 10, 64)
-	if err != nil {
-		return -1, fmt.Errorf("parsing exit code %q: %w", exitStr, err)
-	}
-
-	return exitCode, nil
+	// Always poll with inspect rather than using "container wait".
+	// Apple's "container wait" hangs indefinitely when a container is
+	// stopped or removed externally (e.g., via "moat stop" from another
+	// process), which blocks monitorContainerExit forever.
+	return r.waitByPolling(ctx, containerID)
 }
 
 // waitByPolling polls the container status until it exits.
@@ -387,25 +372,37 @@ func (r *AppleRuntime) waitByPolling(ctx context.Context, containerID string) (i
 		// Check container status
 		// Apple's container inspect outputs JSON directly (no --format flag)
 		cmd := exec.CommandContext(ctx, r.containerBin, "inspect", containerID)
-		var stdout bytes.Buffer
+		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
 
 		if err := cmd.Run(); err != nil {
-			return -1, fmt.Errorf("inspecting container: %w", err)
-		}
+			stderrStr := stderr.String()
+			if strings.Contains(stderrStr, "notFound") || strings.Contains(stderrStr, "not found") {
+				// Container no longer exists (removed externally) — treat as exited
+				return 0, nil
+			}
+			// Transient error (XPC timeout, etc.) — log and keep polling
+			log.Debug("transient inspect error, retrying", "error", err, "stderr", stderrStr)
+		} else {
+			// Apple's inspect returns an array of container info objects
+			var info []struct {
+				Status string `json:"status"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &info); err != nil {
+				return -1, fmt.Errorf("parsing container info: %w", err)
+			}
 
-		// Apple's inspect returns an array of container info objects
-		var info []struct {
-			Status string `json:"status"`
-		}
-		if err := json.Unmarshal(stdout.Bytes(), &info); err != nil {
-			return -1, fmt.Errorf("parsing container info: %w", err)
-		}
+			if len(info) == 0 {
+				// Empty result — container no longer exists (removed externally)
+				return 0, nil
+			}
 
-		if len(info) > 0 && (info[0].Status == "exited" || info[0].Status == "stopped") {
-			// Apple's container CLI doesn't provide exit code in inspect output
-			// Return 0 for stopped containers (best we can do)
-			return 0, nil
+			if info[0].Status == "exited" || info[0].Status == "stopped" {
+				// Apple's container CLI doesn't provide exit code in inspect output
+				// Return 0 for stopped containers (best we can do)
+				return 0, nil
+			}
 		}
 
 		// Sleep before next poll to avoid hammering the CLI
@@ -1135,38 +1132,6 @@ func (r *AppleRuntime) ContainerState(ctx context.Context, containerID string) (
 	}
 
 	return info[0].Status, nil
-}
-
-// Attach connects stdin/stdout/stderr to a running container.
-func (r *AppleRuntime) Attach(ctx context.Context, containerID string, opts AttachOptions) error {
-	// Build attach command arguments
-	args := []string{"attach"}
-	if opts.Stdin != nil {
-		args = append(args, "--stdin")
-	}
-	args = append(args, containerID)
-
-	cmd := exec.CommandContext(ctx, r.containerBin, args...)
-
-	// Connect stdin/stdout/stderr
-	if opts.Stdin != nil {
-		cmd.Stdin = opts.Stdin
-	}
-	if opts.Stdout != nil {
-		cmd.Stdout = opts.Stdout
-	}
-	if opts.Stderr != nil {
-		cmd.Stderr = opts.Stderr
-	}
-
-	// Run the attach command
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		return fmt.Errorf("attaching to container: %w", err)
-	}
-	return nil
 }
 
 // ResizeTTY resizes the container's TTY to the given dimensions.

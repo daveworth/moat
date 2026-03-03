@@ -332,17 +332,54 @@ func (r *DockerRuntime) RemoveContainer(ctx context.Context, containerID string)
 }
 
 // ContainerLogs returns the logs from a container (follows output).
+// For non-TTY containers, the Docker multiplexed format is demuxed
+// so the returned reader produces clean text.
 func (r *DockerRuntime) ContainerLogs(ctx context.Context, containerID string) (io.ReadCloser, error) {
-	return r.cli.ContainerLogs(ctx, containerID, container.LogsOptions{
+	raw, err := r.cli.ContainerLogs(ctx, containerID, container.LogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
 		Follow:     true,
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if container was created with TTY
+	inspect, inspectErr := r.cli.ContainerInspect(ctx, containerID)
+	if inspectErr != nil {
+		raw.Close()
+		return nil, fmt.Errorf("inspecting container for log format: %w", inspectErr)
+	}
+	if inspect.Config.Tty {
+		// TTY mode: logs are plain text
+		return raw, nil
+	}
+
+	// Non-TTY: demux Docker's multiplexed stdout/stderr format
+	pr, pw := io.Pipe()
+	go func() {
+		_, copyErr := stdcopy.StdCopy(pw, pw, raw)
+		raw.Close()
+		pw.CloseWithError(copyErr)
+	}()
+	return pr, nil
 }
 
 // ContainerLogsAll returns all logs from a container (does not follow).
 // The logs are demultiplexed from Docker's format (removes 8-byte headers).
 func (r *DockerRuntime) ContainerLogsAll(ctx context.Context, containerID string) ([]byte, error) {
+	// Wait for the container to stop so Docker's log driver has flushed.
+	// For already-stopped containers this returns immediately. For fast-exiting
+	// containers it prevents reading logs before they're written.
+	waitCtx, waitCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer waitCancel()
+	statusCh, errCh := r.cli.ContainerWait(waitCtx, containerID, container.WaitConditionNotRunning)
+	select {
+	case <-errCh:
+		// Ignore errors — container may already be removed
+	case <-statusCh:
+	}
+
 	reader, err := r.cli.ContainerLogs(ctx, containerID, container.LogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
@@ -618,65 +655,6 @@ func (r *DockerRuntime) ContainerState(ctx context.Context, containerID string) 
 	return inspect.State.Status, nil
 }
 
-// Attach connects stdin/stdout/stderr to a running container.
-func (r *DockerRuntime) Attach(ctx context.Context, containerID string, opts AttachOptions) error {
-	resp, err := r.cli.ContainerAttach(ctx, containerID, container.AttachOptions{
-		Stream: true,
-		Stdin:  opts.Stdin != nil,
-		Stdout: opts.Stdout != nil,
-		Stderr: opts.Stderr != nil,
-	})
-	if err != nil {
-		return fmt.Errorf("attaching to container: %w", err)
-	}
-	defer resp.Close()
-
-	// Set up bidirectional copy
-	outputDone := make(chan error, 1)
-	stdinDone := make(chan error, 1)
-
-	// Copy container output to stdout/stderr.
-	// Since containers are always created with Tty: true (see CreateContainer),
-	// output is always raw (not multiplexed). Use io.Copy unconditionally.
-	go func() {
-		_, err := io.Copy(opts.Stdout, resp.Reader)
-		outputDone <- err
-	}()
-
-	// Copy stdin to container (if provided)
-	if opts.Stdin != nil {
-		go func() {
-			_, err := io.Copy(resp.Conn, opts.Stdin)
-			// Close write side when stdin ends
-			if closeWriter, ok := resp.Conn.(interface{ CloseWrite() error }); ok {
-				if closeErr := closeWriter.CloseWrite(); closeErr != nil && err == nil {
-					err = closeErr
-				}
-			}
-			stdinDone <- err
-		}()
-	}
-
-	// Wait for context cancellation, stdin error (e.g., escape sequence), or output completion
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case err := <-stdinDone:
-			// Stdin error - could be escape sequence or EOF
-			if err != nil && err != io.EOF {
-				return err
-			}
-			// Normal stdin EOF - continue waiting for output
-		case err := <-outputDone:
-			if err != nil && err != io.EOF {
-				return err
-			}
-			return nil
-		}
-	}
-}
-
 // ResizeTTY resizes the container's TTY to the given dimensions.
 func (r *DockerRuntime) ResizeTTY(ctx context.Context, containerID string, height, width uint) error {
 	return r.cli.ContainerResize(ctx, containerID, container.ResizeOptions{
@@ -690,7 +668,7 @@ func (r *DockerRuntime) ResizeTTY(ctx context.Context, containerID string, heigh
 // before the process starts. The attach happens first, then start, ensuring
 // the I/O streams are ready when the container's process begins.
 func (r *DockerRuntime) StartAttached(ctx context.Context, containerID string, opts AttachOptions) error {
-	// Attach first (before starting) - this is the key difference from Attach()
+	// Attach before starting so I/O streams are ready when the process begins
 	resp, err := r.cli.ContainerAttach(ctx, containerID, container.AttachOptions{
 		Stream: true,
 		Stdin:  opts.Stdin != nil,
