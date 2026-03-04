@@ -1978,13 +1978,23 @@ region = %s
 	buildkitEnv := computeBuildKitEnv(buildkitCfg.Enabled)
 	proxyEnv = append(proxyEnv, buildkitEnv...)
 
-	// Extract container resource limits from config (applies to both Docker and Apple)
+	// Extract container resource limits from config (applies to both Docker and Apple).
+	// Priority: explicit agent.yaml > agent provider default > runtime fallback.
 	var memoryMB, cpus int
 	var dns []string
 	if opts.Config != nil {
 		memoryMB = opts.Config.Container.Memory
 		cpus = opts.Config.Container.CPUs
 		dns = opts.Config.Container.DNS
+	}
+
+	// On Apple containers, if agent.yaml didn't set memory and we're running an
+	// AI agent, use the agent default (8 GB). Apple's system default of 1 GB is
+	// too low for Claude Code, Codex, and Gemini CLI.
+	// Docker containers are left unlimited unless explicitly configured.
+	if memoryMB == 0 && m.runtime.Type() == container.RuntimeApple && isAIAgent(opts.Config) {
+		memoryMB = container.DefaultAgentMemoryMB
+		log.Debug("using default agent memory for Apple container", "memoryMB", memoryMB)
 	}
 
 	// Create container
@@ -3092,6 +3102,18 @@ func (m *Manager) Close() error {
 	m.mu.RUnlock()
 
 	return m.runtime.Close()
+}
+
+// isAIAgent returns true if the config specifies an AI coding agent
+// (claude, codex, or gemini). Used to apply agent-specific defaults
+// like the 8 GB memory limit on Apple containers.
+func isAIAgent(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	return strings.HasPrefix(cfg.Agent, "claude") ||
+		strings.HasPrefix(cfg.Agent, "codex") ||
+		strings.HasPrefix(cfg.Agent, "gemini")
 }
 
 // resolveContainerHome returns the home directory to use for container mounts.

@@ -238,8 +238,9 @@ func (r *AppleRuntime) buildCreateArgs(cfg Config) ([]string, error) {
 	}
 
 	// Resource limits (Apple containers only)
-	// Default to 4096 MB (4 GB) memory if not specified, since the Apple container
-	// default of 1024 MB is often insufficient for AI coding environments.
+	// Fallback to 4096 MB (4 GB) when neither agent.yaml nor the run manager
+	// set a memory value. AI agent runs (claude/codex/gemini) receive 8 GB
+	// from the manager; this fallback is for non-agent runs.
 	memoryMB := cfg.MemoryMB
 	if memoryMB == 0 {
 		memoryMB = 4096
