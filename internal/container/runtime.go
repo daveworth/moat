@@ -78,7 +78,7 @@ type Runtime interface {
 	SupportsHostNetwork() bool
 
 	// NetworkManager returns the network manager if supported, nil otherwise.
-	// Docker provides this, Apple containers return nil.
+	// Both Docker and Apple runtimes provide this.
 	NetworkManager() NetworkManager
 
 	// SidecarManager returns the sidecar manager if supported, nil otherwise.
@@ -90,7 +90,7 @@ type Runtime interface {
 	BuildManager() BuildManager
 
 	// ServiceManager returns the service manager if supported, nil otherwise.
-	// Docker provides this, Apple containers return nil.
+	// Both Docker and Apple runtimes provide this.
 	ServiceManager() ServiceManager
 
 	// Close releases runtime resources.
@@ -144,6 +144,10 @@ type NetworkManager interface {
 
 	// ListNetworks returns all moat-managed networks.
 	ListNetworks(ctx context.Context) ([]NetworkInfo, error)
+
+	// NetworkGateway returns the IPv4 gateway address for the given network.
+	// Returns empty string if the gateway cannot be determined.
+	NetworkGateway(ctx context.Context, networkID string) string
 }
 
 // NetworkInfo contains information about a network.

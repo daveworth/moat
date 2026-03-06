@@ -848,6 +848,23 @@ func (m *dockerNetworkManager) ListNetworks(ctx context.Context) ([]NetworkInfo,
 	return result, nil
 }
 
+// NetworkGateway returns the IPv4 gateway for the given Docker network.
+func (m *dockerNetworkManager) NetworkGateway(ctx context.Context, networkID string) string {
+	inspect, err := m.cli.NetworkInspect(ctx, networkID, network.InspectOptions{})
+	if err != nil {
+		log.Debug("failed to inspect network for gateway", "network", networkID, "error", err)
+		return ""
+	}
+	for _, cfg := range inspect.IPAM.Config {
+		if cfg.Gateway != "" {
+			if ip := net.ParseIP(cfg.Gateway); ip != nil && ip.To4() != nil {
+				return cfg.Gateway
+			}
+		}
+	}
+	return ""
+}
+
 // dockerSidecarManager methods
 
 // StartSidecar starts a sidecar container (pull, create, start).
