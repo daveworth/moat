@@ -119,9 +119,18 @@ grants:
   - ssh:github.com # SSH git access
 ```
 
+When both `github` and `ssh:github.com` grants are active, Moat automatically
+configures git to use SSH instead of HTTPS for `github.com`. This means
+`git clone https://github.com/org/repo.git` is transparently rewritten to use
+`git@github.com:org/repo.git`. This avoids authentication issues caused by the
+proxy's TLS interception conflicting with git's HTTPS transport.
+
+To disable the rewrite and use HTTPS for GitHub even when an SSH grant is active, set `MOAT_GIT_SSH_GITHUB=0` in `moat.yaml` under `env:` or pass it via `--env`.
+
 ```bash
 $ moat run -- sh -c "
-  git clone git@github.com:org/repo.git
+  # This uses SSH under the hood (automatic rewrite)
+  git clone https://github.com/org/repo.git
   cd repo
   # Use GitHub API via HTTPS (token injected)
   curl -s https://api.github.com/repos/org/repo/pulls
