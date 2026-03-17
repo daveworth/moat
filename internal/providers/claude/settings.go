@@ -36,6 +36,11 @@ type Settings struct {
 	// ExtraKnownMarketplaces defines additional plugin marketplaces
 	ExtraKnownMarketplaces map[string]MarketplaceEntry `json:"extraKnownMarketplaces,omitempty"`
 
+	// SkipDangerousModePermissionPrompt suppresses the bypass-permissions warning
+	// that Claude Code shows when launched with --dangerously-skip-permissions.
+	// Set to true for container runs since the container provides isolation.
+	SkipDangerousModePermissionPrompt bool `json:"skipDangerousModePermissionPrompt,omitempty"`
+
 	// PluginSources tracks where each plugin setting came from (not serialized)
 	PluginSources map[string]SettingSource `json:"-"`
 
@@ -230,6 +235,8 @@ func MergeSettings(base, override *Settings, overrideSource SettingSource) *Sett
 		ExtraKnownMarketplaces: make(map[string]MarketplaceEntry),
 		PluginSources:          make(map[string]SettingSource),
 		MarketplaceSources:     make(map[string]SettingSource),
+		// Bool fields: true wins (override or base sets it).
+		SkipDangerousModePermissionPrompt: base.SkipDangerousModePermissionPrompt || override.SkipDangerousModePermissionPrompt,
 	}
 
 	// Copy base plugins and sources
