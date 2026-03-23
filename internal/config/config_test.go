@@ -1146,7 +1146,6 @@ claude:
     github:
       command: npx
       args: ["-y", "@modelcontextprotocol/server-github"]
-      grant: github
     filesystem:
       command: npx
       args: ["-y", "@anthropic/mcp-server-filesystem", "/workspace"]
@@ -1175,9 +1174,6 @@ claude:
 	if len(github.Args) != 2 {
 		t.Errorf("github.Args = %d, want 2", len(github.Args))
 	}
-	if github.Grant != "github" {
-		t.Errorf("github.Grant = %q, want %q", github.Grant, "github")
-	}
 
 	filesystem := cfg.Claude.MCP["filesystem"]
 	if filesystem.Cwd != "/workspace" {
@@ -1190,6 +1186,30 @@ claude:
 	}
 	if custom.Env["TOKEN"] != "${secrets.MY_TOKEN}" {
 		t.Errorf("custom.Env[TOKEN] = %q, want %q", custom.Env["TOKEN"], "${secrets.MY_TOKEN}")
+	}
+}
+
+func TestLoadConfigClaudeMCPGrantRejected(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "agent.yaml")
+
+	content := `
+agent: test
+claude:
+  mcp:
+    github:
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-github"]
+      grant: github
+`
+	os.WriteFile(configPath, []byte(content), 0644)
+
+	_, err := Load(dir)
+	if err == nil {
+		t.Fatal("Load should error when grant is set in claude.mcp")
+	}
+	if !strings.Contains(err.Error(), "grant") {
+		t.Errorf("error should mention 'grant', got: %v", err)
 	}
 }
 
@@ -2078,6 +2098,83 @@ mcp:
 	}
 	if !strings.Contains(err.Error(), "duplicate name 'local'") {
 		t.Errorf("expected error about duplicate name, got: %v", err)
+	}
+}
+
+func TestLoadConfigRejectsCodexAndGeminiLocalMCP(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "moat.yaml")
+
+	content := `
+agent: test
+codex:
+  mcp:
+    filesystem:
+      command: npx
+      args: ["-y", "@anthropic/mcp-server-filesystem", "/workspace"]
+gemini:
+  mcp:
+    github:
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-github"]
+`
+	os.WriteFile(configPath, []byte(content), 0644)
+
+	_, err := Load(dir)
+	if err == nil {
+		t.Fatal("Load should error when both codex.mcp and gemini.mcp have local MCP servers")
+	}
+	if !strings.Contains(err.Error(), "codex.mcp and gemini.mcp") {
+		t.Errorf("error should mention codex.mcp and gemini.mcp conflict, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), ".mcp.json") {
+		t.Errorf("error should mention .mcp.json file, got: %v", err)
+	}
+}
+
+func TestLoadConfigAllowsCodexLocalMCPAlone(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "moat.yaml")
+
+	content := `
+agent: test
+codex:
+  mcp:
+    filesystem:
+      command: npx
+      args: ["-y", "@anthropic/mcp-server-filesystem", "/workspace"]
+`
+	os.WriteFile(configPath, []byte(content), 0644)
+
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load should accept codex.mcp alone: %v", err)
+	}
+	if len(cfg.Codex.MCP) != 1 {
+		t.Errorf("Codex.MCP = %d, want 1", len(cfg.Codex.MCP))
+	}
+}
+
+func TestLoadConfigAllowsGeminiLocalMCPAlone(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "moat.yaml")
+
+	content := `
+agent: test
+gemini:
+  mcp:
+    github:
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-github"]
+`
+	os.WriteFile(configPath, []byte(content), 0644)
+
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load should accept gemini.mcp alone: %v", err)
+	}
+	if len(cfg.Gemini.MCP) != 1 {
+		t.Errorf("Gemini.MCP = %d, want 1", len(cfg.Gemini.MCP))
 	}
 }
 

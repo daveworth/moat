@@ -1536,11 +1536,14 @@ region = %s
 		// claudeSettings was loaded earlier for plugin detection
 		hasPlugins := claudeSettings != nil && claudeSettings.HasPluginsOrMarketplaces()
 		isClaudeCode := opts.Config != nil && opts.Config.ShouldSyncClaudeLogs()
+
+		hasClaudeLocalMCP := opts.Config != nil && len(opts.Config.Claude.MCP) > 0
 		// We need PrepareContainer if:
 		// - needsClaudeInit (OAuth credentials to set up)
 		// - hasPlugins (plugin settings to configure)
 		// - isClaudeCode (need to copy onboarding state from host)
-		if needsClaudeInit || hasPlugins || isClaudeCode {
+		// - hasClaudeLocalMCP (local MCP servers to configure)
+		if needsClaudeInit || hasPlugins || isClaudeCode || hasClaudeLocalMCP {
 			claudeProvider := provider.GetAgent("claude")
 			if claudeProvider == nil {
 				cleanupDaemonRun()
@@ -1589,17 +1592,33 @@ region = %s
 				}
 			}
 
+			// Build local MCP server config from claude.mcp entries
+			var claudeLocalMCP map[string]provider.LocalMCPServerConfig
+			if opts.Config != nil && len(opts.Config.Claude.MCP) > 0 {
+				claudeLocalMCP = make(map[string]provider.LocalMCPServerConfig)
+				for name, spec := range opts.Config.Claude.MCP {
+					claudeLocalMCP[name] = provider.LocalMCPServerConfig{
+						Command: spec.Command,
+						Args:    spec.Args,
+						Env:     spec.Env,
+						Cwd:     spec.Cwd,
+					}
+				}
+			}
+
 			// Call provider to prepare container config
 			var prepErr error
 			claudeConfig, prepErr = claudeProvider.PrepareContainer(ctx, provider.PrepareOpts{
-				Credential:     claudeCred,
-				ContainerHome:  containerHome,
-				MCPServers:     mcpServers,
-				RuntimeContext: renderedContext,
+				Credential:      claudeCred,
+				ContainerHome:   containerHome,
+				MCPServers:      mcpServers,
+				RuntimeContext:  renderedContext,
+				LocalMCPServers: claudeLocalMCP,
 				// HostConfig is read automatically by the provider if nil
 			})
 			if prepErr != nil {
 				cleanupDaemonRun()
+				cleanupSSH(sshServer)
 				return nil, fmt.Errorf("preparing Claude container config: %w", prepErr)
 			}
 
@@ -1635,7 +1654,8 @@ region = %s
 	// Set up Codex staging directory for init script using the provider interface.
 	// This includes auth config for OpenAI tokens.
 	var codexConfig *provider.ContainerConfig
-	if needsCodexInit || (opts.Config != nil && opts.Config.ShouldSyncCodexLogs()) {
+	hasCodexLocalMCP := opts.Config != nil && len(opts.Config.Codex.MCP) > 0
+	if needsCodexInit || hasCodexLocalMCP || (opts.Config != nil && opts.Config.ShouldSyncCodexLogs()) {
 		codexProvider := provider.GetAgent("codex")
 		if codexProvider == nil {
 			cleanupDaemonRun()
@@ -1657,15 +1677,58 @@ region = %s
 			}
 		}
 
+		// Build local MCP server config from codex.mcp entries
+		var codexLocalMCP map[string]provider.LocalMCPServerConfig
+		if opts.Config != nil && len(opts.Config.Codex.MCP) > 0 {
+			codexLocalMCP = make(map[string]provider.LocalMCPServerConfig)
+			for name, spec := range opts.Config.Codex.MCP {
+				env := spec.Env
+				if spec.Grant != "" {
+					v, ok := grantToEnvVar(spec.Grant)
+					if !ok {
+						cleanupDaemonRun()
+						cleanupSSH(sshServer)
+						cleanupAgentConfig(claudeConfig)
+						return nil, fmt.Errorf("codex.mcp.%s: unknown grant %q (supported: github, openai, anthropic, gemini)", name, spec.Grant)
+					}
+					if !hasGrant(opts.Config.Grants, spec.Grant) {
+						cleanupDaemonRun()
+						cleanupSSH(sshServer)
+						cleanupAgentConfig(claudeConfig)
+						return nil, fmt.Errorf("codex.mcp.%s: grant %q not declared in top-level grants list — add 'grants: [%s]' to agent.yaml", name, spec.Grant, spec.Grant)
+					}
+					if env == nil {
+						env = make(map[string]string)
+					} else {
+						// Copy to avoid mutating the original config
+						envCopy := make(map[string]string, len(env)+1)
+						for k, v := range env {
+							envCopy[k] = v
+						}
+						env = envCopy
+					}
+					env[v] = grantToPlaceholder(spec.Grant)
+				}
+				codexLocalMCP[name] = provider.LocalMCPServerConfig{
+					Command: spec.Command,
+					Args:    spec.Args,
+					Env:     env,
+					Cwd:     spec.Cwd,
+				}
+			}
+		}
+
 		// Call provider to prepare container config
 		var prepErr error
 		codexConfig, prepErr = codexProvider.PrepareContainer(ctx, provider.PrepareOpts{
-			Credential:     codexCred,
-			ContainerHome:  containerHome,
-			RuntimeContext: renderedContext,
+			Credential:      codexCred,
+			ContainerHome:   containerHome,
+			RuntimeContext:  renderedContext,
+			LocalMCPServers: codexLocalMCP,
 		})
 		if prepErr != nil {
 			cleanupDaemonRun()
+			cleanupSSH(sshServer)
 			cleanupAgentConfig(claudeConfig)
 			return nil, fmt.Errorf("preparing Codex container config: %w", prepErr)
 		}
@@ -1678,7 +1741,8 @@ region = %s
 	// Set up Gemini staging directory for init script using the provider interface.
 	// This includes settings.json and optionally oauth_creds.json.
 	var geminiConfig *provider.ContainerConfig
-	if needsGeminiInit || (opts.Config != nil && opts.Config.ShouldSyncGeminiLogs()) {
+	hasGeminiLocalMCP := opts.Config != nil && len(opts.Config.Gemini.MCP) > 0
+	if needsGeminiInit || hasGeminiLocalMCP || (opts.Config != nil && opts.Config.ShouldSyncGeminiLogs()) {
 		geminiProvider := provider.GetAgent("gemini")
 		if geminiProvider == nil {
 			cleanupDaemonRun()
@@ -1701,15 +1765,59 @@ region = %s
 			}
 		}
 
+		// Build local MCP server config from gemini.mcp entries
+		var geminiLocalMCP map[string]provider.LocalMCPServerConfig
+		if opts.Config != nil && len(opts.Config.Gemini.MCP) > 0 {
+			geminiLocalMCP = make(map[string]provider.LocalMCPServerConfig)
+			for name, spec := range opts.Config.Gemini.MCP {
+				env := spec.Env
+				if spec.Grant != "" {
+					v, ok := grantToEnvVar(spec.Grant)
+					if !ok {
+						cleanupDaemonRun()
+						cleanupSSH(sshServer)
+						cleanupAgentConfig(claudeConfig)
+						cleanupAgentConfig(codexConfig)
+						return nil, fmt.Errorf("gemini.mcp.%s: unknown grant %q (supported: github, openai, anthropic, gemini)", name, spec.Grant)
+					}
+					if !hasGrant(opts.Config.Grants, spec.Grant) {
+						cleanupDaemonRun()
+						cleanupSSH(sshServer)
+						cleanupAgentConfig(claudeConfig)
+						cleanupAgentConfig(codexConfig)
+						return nil, fmt.Errorf("gemini.mcp.%s: grant %q not declared in top-level grants list — add 'grants: [%s]' to agent.yaml", name, spec.Grant, spec.Grant)
+					}
+					if env == nil {
+						env = make(map[string]string)
+					} else {
+						envCopy := make(map[string]string, len(env)+1)
+						for k, v := range env {
+							envCopy[k] = v
+						}
+						env = envCopy
+					}
+					env[v] = grantToPlaceholder(spec.Grant)
+				}
+				geminiLocalMCP[name] = provider.LocalMCPServerConfig{
+					Command: spec.Command,
+					Args:    spec.Args,
+					Env:     env,
+					Cwd:     spec.Cwd,
+				}
+			}
+		}
+
 		// Call provider to prepare container config
 		var prepErr error
 		geminiConfig, prepErr = geminiProvider.PrepareContainer(ctx, provider.PrepareOpts{
-			Credential:     geminiCred,
-			ContainerHome:  containerHome,
-			RuntimeContext: renderedContext,
+			Credential:      geminiCred,
+			ContainerHome:   containerHome,
+			RuntimeContext:  renderedContext,
+			LocalMCPServers: geminiLocalMCP,
 		})
 		if prepErr != nil {
 			cleanupDaemonRun()
+			cleanupSSH(sshServer)
 			cleanupAgentConfig(claudeConfig)
 			cleanupAgentConfig(codexConfig)
 			return nil, fmt.Errorf("preparing Gemini container config: %w", prepErr)
@@ -3605,4 +3713,48 @@ func cloneMarketplacesOnHost(ctx context.Context, marketplaces []claude.Marketpl
 		log.Info("pre-cloned marketplace on host", "name", m.Name)
 	}
 	return result
+}
+
+// grantToEnvVar maps a grant name to the environment variable that local MCP
+// servers expect. The env var is set to a proxy placeholder so the proxy can
+// intercept and substitute the real credential.
+func grantToEnvVar(grant string) (string, bool) {
+	switch grant {
+	case "github":
+		return "GITHUB_TOKEN", true
+	case "openai":
+		return "OPENAI_API_KEY", true
+	case "anthropic":
+		return "ANTHROPIC_API_KEY", true
+	case "gemini":
+		return "GEMINI_API_KEY", true
+	default:
+		return "", false
+	}
+}
+
+// grantToPlaceholder returns a format-valid placeholder value for the given
+// grant. Some SDKs validate credential format before making HTTP requests
+// (e.g. gh CLI requires ghp_ prefix, OpenAI SDK requires sk- prefix), so
+// ProxyInjectedPlaceholder would fail their format check before the proxy
+// can inject the real token.
+func grantToPlaceholder(grant string) string {
+	switch grant {
+	case "github":
+		return credential.GitHubTokenPlaceholder
+	case "openai":
+		return credential.OpenAIAPIKeyPlaceholder
+	default:
+		return credential.ProxyInjectedPlaceholder
+	}
+}
+
+// hasGrant checks whether a grant name appears in the grants list.
+func hasGrant(grants []string, name string) bool {
+	for _, g := range grants {
+		if strings.Split(g, ":")[0] == name {
+			return true
+		}
+	}
+	return false
 }

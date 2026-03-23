@@ -45,13 +45,27 @@ func (p *OAuthProvider) PrepareContainer(ctx context.Context, opts provider.Prep
 
 	// Convert MCP servers to Claude's format
 	var mcpServers map[string]MCPServerForContainer
-	if len(opts.MCPServers) > 0 {
+	if len(opts.MCPServers) > 0 || len(opts.LocalMCPServers) > 0 {
 		mcpServers = make(map[string]MCPServerForContainer)
+		// Remote/relay MCP servers (type: http)
 		for name, cfg := range opts.MCPServers {
 			mcpServers[name] = MCPServerForContainer{
 				Type:    "http",
 				URL:     cfg.URL,
 				Headers: cfg.Headers,
+			}
+		}
+		// Local process MCP servers (type: stdio)
+		for name, cfg := range opts.LocalMCPServers {
+			if _, exists := mcpServers[name]; exists {
+				return nil, fmt.Errorf("mcp server name %q is used by both a remote and a local server — names must be unique", name)
+			}
+			mcpServers[name] = MCPServerForContainer{
+				Type:    "stdio",
+				Command: cfg.Command,
+				Args:    cfg.Args,
+				Env:     cfg.Env,
+				Cwd:     cfg.Cwd,
 			}
 		}
 	}
@@ -111,7 +125,10 @@ func (p *OAuthProvider) PrepareContainer(ctx context.Context, opts provider.Prep
 // ANTHROPIC_API_KEY. Both use placeholder values — real credentials are injected
 // by the proxy at the network layer.
 func containerEnvForCredential(cred *provider.Credential) []string {
-	if cred != nil && cred.Provider == "claude" {
+	if cred == nil {
+		return nil
+	}
+	if cred.Provider == "claude" {
 		return []string{"CLAUDE_CODE_OAUTH_TOKEN=" + ProxyInjectedPlaceholder}
 	}
 	return []string{"ANTHROPIC_API_KEY=" + ProxyInjectedPlaceholder}

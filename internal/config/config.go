@@ -307,7 +307,6 @@ type MCPServerSpec struct {
 	Args []string `yaml:"args,omitempty"`
 
 	// Env are environment variables for the server
-	// Supports ${secrets.NAME} syntax for secret references
 	Env map[string]string `yaml:"env,omitempty"`
 
 	// Grant specifies a credential grant to inject (e.g., "github", "anthropic")
@@ -580,6 +579,12 @@ func Load(dir string) (*Config, error) {
 		}
 	}
 
+	// Validate that codex.mcp and gemini.mcp don't both define local MCP servers.
+	// Both write to /workspace/.mcp.json, so only one can be used at a time.
+	if len(cfg.Codex.MCP) > 0 && len(cfg.Gemini.MCP) > 0 {
+		return nil, fmt.Errorf("both codex.mcp and gemini.mcp define local MCP servers, but they share the same .mcp.json file — only one agent section can define local MCP servers")
+	}
+
 	// Validate top-level MCP server specs
 	seenNames := make(map[string]bool)
 	for i, spec := range cfg.MCP {
@@ -702,10 +707,13 @@ func validateMarketplaceSpec(name string, spec MarketplaceSpec) error {
 }
 
 // validateMCPServerSpec validates an MCP server specification.
-// The section parameter is "claude" or "codex" for error messages.
+// The section parameter is "claude", "codex", or "gemini" for error messages.
 func validateMCPServerSpec(section, name string, spec MCPServerSpec) error {
 	if spec.Command == "" {
 		return fmt.Errorf("%s.mcp.%s: 'command' is required", section, name)
+	}
+	if section == "claude" && spec.Grant != "" {
+		return fmt.Errorf("claude.mcp.%s: 'grant' is not supported for Claude Code local MCP servers — Claude Code manages its own credential injection", name)
 	}
 	return nil
 }
