@@ -41,6 +41,13 @@ type Settings struct {
 	// Set to true for container runs since the container provides isolation.
 	SkipDangerousModePermissionPrompt bool `json:"skipDangerousModePermissionPrompt,omitempty"`
 
+	// RawExtras holds unknown JSON fields from settings files.
+	// Only extras from the moat-user source (~/.moat/claude/settings.json)
+	// are preserved through merge and written to the container.
+	// This allows users to pass arbitrary Claude Code settings without
+	// needing a code change for each new field.
+	RawExtras map[string]json.RawMessage `json:"-"`
+
 	// PluginSources tracks where each plugin setting came from (not serialized)
 	PluginSources map[string]SettingSource `json:"-"`
 
@@ -67,6 +74,67 @@ type MarketplaceSource struct {
 
 	// Path is the local directory path (for source: directory)
 	Path string `json:"path,omitempty"`
+}
+
+// knownSettingsKeys lists the JSON keys that map to explicit Settings fields.
+// Everything else is captured in RawExtras.
+var knownSettingsKeys = map[string]bool{
+	"enabledPlugins":                    true,
+	"extraKnownMarketplaces":            true,
+	"skipDangerousModePermissionPrompt": true,
+}
+
+// UnmarshalJSON implements custom unmarshaling to capture unknown fields in RawExtras.
+func (s *Settings) UnmarshalJSON(data []byte) error {
+	// First, unmarshal known fields using an alias to avoid recursion.
+	type settingsAlias Settings
+	var alias settingsAlias
+	if err := json.Unmarshal(data, &alias); err != nil {
+		return err
+	}
+	*s = Settings(alias)
+
+	// Then, unmarshal the full object to find unknown keys.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	for key, val := range raw {
+		if !knownSettingsKeys[key] {
+			if s.RawExtras == nil {
+				s.RawExtras = make(map[string]json.RawMessage)
+			}
+			s.RawExtras[key] = val
+		}
+	}
+
+	return nil
+}
+
+// MarshalJSON implements custom marshaling that includes RawExtras fields.
+func (s Settings) MarshalJSON() ([]byte, error) {
+	// Build a map of known fields.
+	m := make(map[string]any)
+
+	if len(s.EnabledPlugins) > 0 {
+		m["enabledPlugins"] = s.EnabledPlugins
+	}
+	if len(s.ExtraKnownMarketplaces) > 0 {
+		m["extraKnownMarketplaces"] = s.ExtraKnownMarketplaces
+	}
+	if s.SkipDangerousModePermissionPrompt {
+		m["skipDangerousModePermissionPrompt"] = true
+	}
+
+	// Emit extras — keys matching known struct fields are skipped (they're already serialized above).
+	for key, val := range s.RawExtras {
+		if !knownSettingsKeys[key] {
+			m[key] = val
+		}
+	}
+
+	return json.Marshal(m)
 }
 
 // LoadSettings loads a single Claude settings.json file.
@@ -211,20 +279,37 @@ func MergeSettings(base, override *Settings, overrideSource SettingSource) *Sett
 		return &Settings{}
 	}
 	if base == nil {
-		// Initialize source tracking for override
-		if override != nil && override.PluginSources == nil {
-			override.PluginSources = make(map[string]SettingSource)
-			for k := range override.EnabledPlugins {
-				override.PluginSources[k] = overrideSource
+		// Clone override to avoid mutating the caller's struct.
+		result := &Settings{
+			EnabledPlugins:                    cloneMapStringBool(override.EnabledPlugins),
+			ExtraKnownMarketplaces:            cloneMapStringMarketplace(override.ExtraKnownMarketplaces),
+			SkipDangerousModePermissionPrompt: override.SkipDangerousModePermissionPrompt,
+			PluginSources:                     make(map[string]SettingSource),
+			MarketplaceSources:                make(map[string]SettingSource),
+		}
+
+		// Initialize source tracking
+		for k := range result.EnabledPlugins {
+			if override.PluginSources != nil {
+				result.PluginSources[k] = override.PluginSources[k]
+			} else {
+				result.PluginSources[k] = overrideSource
 			}
 		}
-		if override != nil && override.MarketplaceSources == nil {
-			override.MarketplaceSources = make(map[string]SettingSource)
-			for k := range override.ExtraKnownMarketplaces {
-				override.MarketplaceSources[k] = overrideSource
+		for k := range result.ExtraKnownMarketplaces {
+			if override.MarketplaceSources != nil {
+				result.MarketplaceSources[k] = override.MarketplaceSources[k]
+			} else {
+				result.MarketplaceSources[k] = overrideSource
 			}
 		}
-		return override
+
+		// Propagate RawExtras only from moat-user source
+		if overrideSource == SourceMoatUser {
+			result.RawExtras = cloneMapStringRawMessage(override.RawExtras)
+		}
+
+		return result
 	}
 	if override == nil {
 		return base
@@ -263,6 +348,29 @@ func MergeSettings(base, override *Settings, overrideSource SettingSource) *Sett
 	for k, v := range override.ExtraKnownMarketplaces {
 		result.ExtraKnownMarketplaces[k] = v
 		result.MarketplaceSources[k] = overrideSource
+	}
+
+	// Propagate RawExtras only from the moat-user source.
+	// Other sources (host ~/.claude/settings.json, project, moat.yaml)
+	// are filtered to known fields only.
+	if overrideSource == SourceMoatUser && len(override.RawExtras) > 0 {
+		if result.RawExtras == nil {
+			result.RawExtras = make(map[string]json.RawMessage)
+		}
+		for k, v := range override.RawExtras {
+			result.RawExtras[k] = v
+		}
+	}
+	// Preserve base extras (from earlier moat-user merge)
+	if len(base.RawExtras) > 0 {
+		if result.RawExtras == nil {
+			result.RawExtras = make(map[string]json.RawMessage)
+		}
+		for k, v := range base.RawExtras {
+			if _, exists := result.RawExtras[k]; !exists {
+				result.RawExtras[k] = v
+			}
+		}
 	}
 
 	return result
@@ -416,4 +524,40 @@ func (s *Settings) GetMarketplaceNames() []string {
 		result = append(result, name)
 	}
 	return result
+}
+
+// cloneMapStringBool returns a shallow copy of the map (nil-safe).
+func cloneMapStringBool(m map[string]bool) map[string]bool {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// cloneMapStringMarketplace returns a shallow copy of the map (nil-safe).
+func cloneMapStringMarketplace(m map[string]MarketplaceEntry) map[string]MarketplaceEntry {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]MarketplaceEntry, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// cloneMapStringRawMessage returns a shallow copy of the map (nil-safe).
+func cloneMapStringRawMessage(m map[string]json.RawMessage) map[string]json.RawMessage {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]json.RawMessage, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
