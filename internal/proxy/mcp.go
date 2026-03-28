@@ -20,6 +20,27 @@ var mcpRelayClient = &http.Client{
 	},
 }
 
+// formatCredValue prepends "Bearer " for OAuth grants; returns raw value otherwise.
+// grantToCommand converts a grant name like "oauth:notion" or "mcp-context7"
+// to a CLI-friendly form suitable for use in "moat grant <args>" instructions.
+// Examples: "oauth:notion" → "oauth notion", "mcp-context7" → "mcp context7".
+func grantToCommand(grant string) string {
+	if parts := strings.SplitN(grant, ":", 2); len(parts) == 2 {
+		return parts[0] + " " + parts[1]
+	}
+	if after, ok := strings.CutPrefix(grant, "mcp-"); ok {
+		return "mcp " + after
+	}
+	return grant
+}
+
+func formatCredValue(grant, value string) string {
+	if strings.HasPrefix(grant, "oauth:") {
+		return "Bearer " + value
+	}
+	return value
+}
+
 // injectMCPCredentials checks if the request is to an MCP server and injects
 // the real credential if a stub is detected. Uses the request's own context
 // for RunContextData lookup.
@@ -127,13 +148,13 @@ func (p *Proxy) injectMCPCredentialsWithContext(ctxReq, targetReq *http.Request)
 			"action", "inject-error",
 			"server", matchedServer.Name,
 			"grant", matchedServer.Auth.Grant,
-			"fix", "Run: moat grant mcp "+strings.TrimPrefix(matchedServer.Auth.Grant, "mcp-"))
+			"fix", "Run: moat grant "+grantToCommand(matchedServer.Auth.Grant))
 		// Leave stub in place - request will fail with stub credential
 		return
 	}
 
 	// Replace stub with real credential
-	targetReq.Header.Set(matchedServer.Auth.Header, credValue)
+	targetReq.Header.Set(matchedServer.Auth.Header, formatCredValue(matchedServer.Auth.Grant, credValue))
 
 	log.Debug("credential injected",
 		"subsystem", "proxy",
@@ -235,15 +256,17 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if credValue == "" {
-			http.Error(w, fmt.Sprintf("MOAT: Failed to load credential for '%s'. Grant: %s. Run: moat grant mcp %s",
-				serverName, mcpServer.Auth.Grant, strings.TrimPrefix(mcpServer.Auth.Grant, "mcp-")),
+			http.Error(w, fmt.Sprintf("MOAT: Failed to load credential for '%s'. Grant: %s. Run: moat grant %s",
+				serverName, mcpServer.Auth.Grant, grantToCommand(mcpServer.Auth.Grant)),
 				http.StatusInternalServerError)
 			return
 		}
 
 		// Inject the real credential
-		proxyReq.Header.Set(mcpServer.Auth.Header, credValue)
+		proxyReq.Header.Set(mcpServer.Auth.Header, formatCredValue(mcpServer.Auth.Grant, credValue))
 	}
+
+	log.Debug("MCP relay forwarding", "server", serverName, "method", proxyReq.Method, "url", targetURL.String())
 
 	// Send request to actual MCP server using the reused client
 	resp, err := mcpRelayClient.Do(proxyReq)
@@ -253,6 +276,8 @@ func (p *Proxy) handleMCPRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+
+	log.Debug("MCP relay response", "server", serverName, "status", resp.StatusCode)
 
 	// Copy response headers
 	for key, values := range resp.Header {
