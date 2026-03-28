@@ -1314,7 +1314,8 @@ moat system clean-temp [flags]
 Moat creates temporary directories in `/tmp` for AWS credentials, Claude configuration, and Codex configuration. These are normally cleaned up when a run completes, but may accumulate if moat crashes.
 
 This command scans for and removes temporary directories matching these patterns:
-- `agentops-aws-*` - AWS credential helper directories
+- `moat-aws-*` - AWS credential helper directories
+- `agentops-aws-*` - AWS credential helper directories (legacy)
 - `moat-claude-staging-*` - Claude configuration staging directories
 - `moat-codex-staging-*` - Codex configuration staging directories
 - `moat-npm-*` - npm credential configuration directories

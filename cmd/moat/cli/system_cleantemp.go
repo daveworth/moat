@@ -25,7 +25,8 @@ This command finds and removes temporary directories that:
   - Are older than the specified age (default: 1 hour)
 
 Patterns scanned:
-  - agentops-aws-*           (AWS credential helpers)
+  - moat-aws-*               (AWS credential helpers)
+  - agentops-aws-*           (AWS credential helpers, legacy)
   - moat-claude-staging-*    (Claude configuration)
   - moat-codex-staging-*     (Codex configuration)`,
 	RunE: runCleanTemp,
